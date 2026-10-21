@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Mini Royale</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;background:#0e0e18;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}
+body{display:flex;align-items:center;justify-content:center}
+#wrap{height:min(100vh,calc(100vw*740/360));aspect-ratio:360/740}
+canvas{width:100%;height:100%;display:block;touch-action:none;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<!-- LOAD HEROES AND AI FIRST SO THE MAIN GAME CAN READ THEM -->
+<script src="hero.js"></script>
+<script src="ai.js"></script>
+
+<script>
+const cvs=document.getElementById('c'),ctx=cvs.getContext('2d');
+const CW=360,CH=740,S=20,AW=18,AH=32,RT=15,RB=17,RY=16,BL=3.5,BR=14.5;
+cvs.width=CW;cvs.height=CH;
+const EF='"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+
+/* ---------- POOL (14 Normal/Ancient + 1 New) ---------- */
+const POOL=[
+ {n:'Knight',  c:3,hp:720, dmg:80, sp:2.2,rng:0.8,rate:1.2,col:'#cfd8e8',emoji:'🛡️',size:0.55},
+ {n:'Archer',  c:3,hp:260, dmg:42, sp:2.4,rng:5.0,rate:1.1,col:'#8be08b',emoji:'🏹',size:0.45,
+    ancient:{hp:300,dmg:200,sp:2.5,rng:5.2,rate:1.0,ability:'quiver',ancientCycle:1}},
+ {n:'Giant',   c:5,hp:2400,dmg:130,sp:1.3,rng:0.8,rate:1.5,col:'#e8b06a',emoji:'🗿',size:0.85,towerOnly:true},
+ {n:'Goblins', c:2,hp:190, dmg:45, sp:3.0,rng:0.7,rate:0.8,col:'#6fd66f',emoji:'👺',size:0.38,count:3},
+ {n:'Temple Guard',c:4,hp:1720,dmg:185,sp:2.0,rng:0.8,rate:1.3,col:'#d4c89e',emoji:'🏛️',size:0.6,
+    ancient:{hp:2050,dmg:210,ability:'ward'}},
+ {n:'Temple Mite',c:1,hp:80, dmg:30, sp:3.0,rng:0.8,rate:1.1,col:'#9e8a6a',emoji:'🪳',size:0.35,
+    ancient:{hp:100,dmg:35,ability:'fossil'}},
+ {n:'Stone Sentinel',c:3,hp:720,dmg:95,sp:0,rng:5.5,rate:1.3,col:'#8a8a9e',emoji:'🪨',size:0.6,lifetime:22,
+    ancient:{hp:820,dmg:105,ability:'petrify'}},
+ {n:'Dune Rider',c:4,hp:920,dmg:170,sp:2.4,rng:0.8,rate:1.2,col:'#d4a15a',emoji:'🏇',size:0.55,charge:true},
+ {n:'Colossus',c:5,hp:2900,dmg:230,sp:1.0,rng:0.8,rate:1.6,col:'#8a6a8a',emoji:'👹',size:0.9,towerOnly:true},
+ {n:'Temple Bones',c:1,hp:60,dmg:60,sp:3.0,rng:0.8,rate:1.0,col:'#e0e0e0',emoji:'💀',size:0.35,count:3},
+ {n:'Anubis Hound',c:5,hp:2800,dmg:200,sp:1.0,rng:0.8,rate:1.5,col:'#3a3a4a',emoji:'🐺',size:0.85,towerOnly:true,splitType:'pup',
+    ancient:{hp:3050,dmg:220,ability:'tomb'}},
+ {n:'Bone Caravan',c:3,hp:380,dmg:75,sp:2.4,rng:0.8,rate:1.3,col:'#d4c89e',emoji:'🐪',size:0.5,count:2,towerOnly:true,relic:true},
+ {n:'Rolling Sarcophagus',c:1,hp:250,dmg:130,sp:15,rng:0.1,rate:99,col:'#aaaaaa',emoji:'🪦',size:0.6,isRolling:true,maxRoll:9,knockback:1},
+ {n:'Bone Urn',c:3,hp:640,dmg:0,sp:2.0,rng:0.8,rate:99,col:'#d4c89e',emoji:'🏺',size:0.6,towerOnly:true,splitType:'urn',
+    ancient:{hp:760,dmg:0,ability:'curse',ancientCycle:1}},
+ // --- NEW CARD ---
+ {n:'Barbarian Cask',c:2,hp:220,dmg:115,sp:15,rng:0.1,rate:99,col:'#8d6e3f',emoji:'🛢️',size:0.5,isRolling:true,maxRoll:7,knockback:1,spawnBarbarian:true,
+    ancient:{hp:280,dmg:130,maxRoll:8,knockback:1.5,ancientCycle:2}}
+];
+
+// --- COMBINE POOLS (Safely checks if heroes are loaded) ---
+const ALL_CARDS = [...POOL, ...((typeof HERO_POOL !== 'undefined') ? HERO_POOL : [])];
+
+/* ---------- PICKER LAYOUT ---------- */
+const PCW=80,PCH=85,PPAD=6,PSX=(CW-(4*PCW+3*PPAD))/2,PSY=65;
+const PBY=570;
+
+/* ---------- STATE ---------- */
+let state='pick';
+let pickDeck=[];
+let pickScrollY=0;
+let units,towers,fx,fossils,relics,elix,over,time,last=0;
+let pDeck,pQueue,aDeck,aQueue,pSel;
+
+function shuffleArray(a){
+  for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]];}
+  return a;
+}
+
+/* ---------- START ---------- */
+function startGame(){
+  if(pickDeck.length!==8) return;
+  const slots=pickDeck.map(s=>({ci:s.cardIndex,ancient:s.ancient,counter:0}));
+  shuffleArray(slots);
+  pDeck=slots.slice(0,4);
+  pQueue=slots.slice(4);
+
+  const aiIdx=shuffleArray([...Array(ALL_CARDS.length).keys()]);
+  const aiSlots=aiIdx.slice(0,8).map(ci=>({
+    ci,ancient:!!(ALL_CARDS[ci].ancient&&Math.random()<0.3),counter:0
+  }));
+  shuffleArray(aiSlots);
+  aDeck=aiSlots.slice(0,4);
+  aQueue=aiSlots.slice(4);
+
+  units=[];fx=[];fossils=[];relics=[];elix=[5,5];over=0;time=0;pSel=-1;
+  
+  const P=(x,y,team,king)=>({x,y,team,king,
+    hp:king?7032:4424,maxHp:king?7032:4424,
+    dmg:145,range:7.5,rate:king?1.0:0.8,cd:0,
+    size:king?2:1.5,alive:true,active:!king,shieldUntil:0,shieldAmount:0,
+    markUntil:0, markBonus:0});
+  towers=[P(3.5,6.5,1,0),P(14.5,6.5,1,0),P(9,3,1,1),
+          P(3.5,25.5,0,0),P(14.5,25.5,0,0),P(9,29,0,1)];
+
+  if(window.AI && AI.onGameStart) AI.onGameStart();
+  if(window.HeroSystem && HeroSystem.onGameStart) HeroSystem.onGameStart();
+  state='play';
+}
+
+/* ---------- DEPLOY ---------- */
+function deploy(team,handIndex,x,y){
+  const hand=team===0?pDeck:aDeck, queue=team===0?pQueue:aQueue;
+  const slot=hand[handIndex];
+  if(!slot) return false;
+  const card=ALL_CARDS[slot.ci];
+  if(elix[team]<card.c) return false;
+  elix[team]-=card.c;
+
+  let useAncient=false;
+  if(slot.ancient&&card.ancient){
+    const cycleReq = card.ancient.ancientCycle || 2;
+    if(slot.counter>=cycleReq){useAncient=true;slot.counter=0;}
+    else slot.counter++;
+  }
+  const st=useAncient?{...card,...card.ancient}:card;
+  const lane=x<9?'L':'R', n=st.count||1;
+  for(let i=0;i<n;i++){
+    const a=i/n*Math.PI*2,r=n>1?0.8:0;
+    const u={
+      x:Math.max(0.6,Math.min(AW-0.6,x+Math.cos(a)*r)),
+      y:Math.max(0.6,Math.min(AH-0.6,y+Math.sin(a)*r)),
+      team,lane,hp:st.hp,maxHp:st.hp,dmg:st.dmg,sp:st.sp,rng:st.rng,
+      rate:st.rate,cd:0,size:st.size,col:st.col,emoji:st.emoji,
+      ancient:useAncient,ability:useAncient?st.ability:null,
+      towerOnly:!!card.towerOnly,lifetime:card.lifetime||0,
+      charge:!!card.charge,distSinceHit:0,chargeReady:false,
+      slowUntil:0,slowAmount:0,untargetableUntil:0,
+      dmgReductionUntil:0,wardUntil:0,wardPulseCd:0,deathDone:false,
+      lockedTarget:null, stunUntil:0, gazeCd:0, petrifyArmed:false, 
+      splitType:card.splitType||null, relic:!!card.relic, killedTower:false, speedBuffUntil:0,
+      isRolling:!!card.isRolling, rollDist:0, hitEnemies:null,
+      maxRoll:st.maxRoll || 9, knockback:st.knockback || 1,
+      spawnBarbarian:!!card.spawnBarbarian,
+      shotsFired:0, markUntil:0, markBonus:0, isHero:!!card.isHero, shield: 0
+    };
+    if(useAncient&&u.ability==='ward'){u.wardUntil=time+6;u.dmgReductionUntil=time+6;u.wardPulseCd=2.5;}
+    if(useAncient&&u.ability==='fossil') u.untargetableUntil=time+0.6;
+    if(useAncient&&u.ability==='petrify') u.gazeCd=5;
+    if(u.isRolling) u.hitEnemies=new Set();
+    
+    units.push(u);
+    if (u.isHero && u.team === 0 && window.HeroSystem) HeroSystem.onHeroSpawn(u);
+  }
+
+  hand.splice(handIndex,1);
+  hand.push(queue.shift());
+  queue.push(slot);
+  return true;
+}
+
+/* ---------- GAME BRIDGE ---------- */
+const GameBridge = {
+  getState(){
+    return {
+      over, time, elix: elix[0], enemyElix: elix[1], units, towers, fx, AH, S,
+      myElixir: elix[1], enemyElix: elix[0],
+      myHand: aDeck.map(slot => {
+        const card = ALL_CARDS[slot.ci];
+        return {
+          ...card, ancientStats: card.ancient || null, ancient: !!slot.ancient,
+          ancientReady: !!slot.ancient && !!card.ancient && slot.counter >= (card.ancient.ancientCycle||2),
+          counter: slot.counter
+        };
+      }),
+      myUnits: units.filter(u=>u.team===1).map(u=>({
+        x:u.x, y:u.y, hp:u.hp, maxHp:u.maxHp, dmg:u.dmg, rng:u.rng,
+        size:u.size, lane:u.lane, towerOnly:u.towerOnly, ancient:u.ancient, isHero:u.isHero
+      })),
+      enemyUnits: units.filter(u=>u.team===0).map(u=>({
+        x:u.x, y:u.y, hp:u.hp, maxHp:u.maxHp, dmg:u.dmg, rng:u.rng,
+        size:u.size, lane:u.lane, towerOnly:u.towerOnly, ancient:u.ancient, isHero:u.isHero
+      })),
+      myTowers: towers.filter(t=>t.team===1).map(t=>({ x:t.x, y:t.y, hp:t.hp, maxHp:t.maxHp, king:t.king, alive:t.alive })),
+      enemyTowers: towers.filter(t=>t.team===0).map(t=>({ x:t.x, y:t.y, hp:t.hp, maxHp:t.maxHp, king:t.king, alive:t.alive })),
+      constants: { RY, RT, RB, BL, BR, S, AW, AH, CW, CH }
+    };
+  },
+  deploy(handIndex, x, y){ return deploy(1, handIndex, x, y); }
+};
+
+/* ---------- TARGETING & PATHFINDING ---------- */
+function findTarget(u){
+  const et=1-u.team;
+  if(u.towerOnly){
+    const al=towers.filter(t=>t.team===et&&t.alive);
+    const p=al.find(t=>!t.king&&(u.lane==='L'?t.x<9:t.x>9));
+    return p||al.find(t=>t.king)||null;
+  }
+  let best=null,bd=6;
+  for(const e of units){
+    if(e.team!==et||e.hp<=0) continue;
+    if(time<e.untargetableUntil) continue;
+    const d=Math.hypot(e.x-u.x,e.y-u.y);
+    if(d<bd){bd=d;best=e;}
+  }
+  if(best) return best;
+  const al=towers.filter(t=>t.team===et&&t.alive);
+  const p=al.find(t=>!t.king&&(u.lane==='L'?t.x<9:t.x>9));
+  if(p) return p;
+  return al.find(t=>t.king)||null;
+}
+
+function pathPoint(u,tx,ty){
+  const uTop=u.y<RY,tTop=ty<RY;
+  const bx=Math.abs(u.x-BL)<Math.abs(u.x-BR)?BL:BR;
+  if(uTop!==tTop){
+    if(Math.abs(u.x-bx)>0.7) return {x:bx,y:uTop?RT-1:RB+1};
+    return {x:bx,y:uTop?RB+1:RT-1};
+  }
+  return {x:tx,y:ty};
+}
+
+/* ---------- UNIT UPDATE ---------- */
+function updUnit(u,dt){
+  if(u.isRolling){
+    if(u.hp<=0) return;
+    const dir = u.team === 0 ? -1 : 1;
+    const move = u.sp * dt;
+    u.y += dir * move;
+    u.rollDist += move;
+    
+    for(const e of units){
+      if(e.team===u.team || e.hp<=0 || u.hitEnemies.has(e)) continue;
+      if(Math.hypot(e.x-u.x, e.y-u.y) < u.size+e.size){
+        u.hitEnemies.add(e);
+        const hitCount = u.hitEnemies.size - 1;
+        const dmg = (u.dmg || 130) * Math.pow(0.65, hitCount);
+        e.hp -= dmg;
+        e.y += dir * u.knockback;
+        e.stunUntil = Math.max(e.stunUntil, time + 0.2);
+      }
+    }
+    
+    if(!u.spawnBarbarian) {
+      for(const t of towers){
+        if(t.team===u.team || !t.alive || u.hitEnemies.has(t)) continue;
+        if(Math.hypot(t.x-u.x, t.y-u.y) < u.size+t.size){
+          u.hitEnemies.add(t);
+          t.hp -= 40;
+        }
+      }
+    }
+
+    if(u.rollDist >= u.maxRoll || u.y < 0 || u.y > AH || u.hp <= 0) {
+      u.hp = 0;
+      
+      if(u.spawnBarbarian) {
+        const bHp = u.ancient ? 440 : 380;
+        const bDmg = u.ancient ? 88 : 78;
+        const shield = u.ancient ? 100 : 0;
+        units.push({
+          x: u.x, y: Math.max(0.6, Math.min(AH-0.6, u.y)), team: u.team, lane: u.lane,
+          hp: bHp, maxHp: bHp, dmg: bDmg, sp: 2.2, rng: 1.2, rate: 1.4,
+          cd: 0, size: 0.55, col: '#cfd8e8', emoji: '⚔️', ancient: false, ability: null,
+          towerOnly: false, lifetime: 0, charge: false, distSinceHit: 0, chargeReady: false,
+          slowUntil: 0, slowAmount: 0, untargetableUntil: 0, dmgReductionUntil: 0,
+          wardUntil: 0, wardPulseCd: 0, deathDone: false, lockedTarget: null, stunUntil: 0,
+          gazeCd: 0, petrifyArmed: false, splitType: null, relic: false, killedTower: false,
+          speedBuffUntil: 0, isRolling: false, maxRoll: 0, knockback: 0, spawnBarbarian: false,
+          markUntil: 0, markBonus: 0, shotsFired: 0, isHero: false, shield: shield
+        });
+      }
+    }
+    return;
+  }
+
+  if(time<u.stunUntil) return;
+  u.cd-=dt;
+  if(u.lifetime>0){u.lifetime-=dt;if(u.lifetime<=0){u.hp=0;return;}}
+  
+  if(u.ability==='ward'&&time<u.wardUntil){
+    u.wardPulseCd-=dt;
+    if(u.wardPulseCd<=0){
+      u.wardPulseCd=2.5;
+      fx.push({type:'ring',x:u.x,y:u.y,t:0.4,maxT:0.4,maxR:3*S});
+      for(const e of units){
+        if(e.team===u.team||e.hp<=0) continue;
+        if(Math.hypot(e.x-u.x,e.y-u.y)<3){
+          e.hp-=55;
+          e.slowUntil=Math.max(e.slowUntil,time+1);
+          e.slowAmount=Math.max(e.slowAmount,0.20);
+        }
+      }
+    }
+  }
+
+  if(u.ability==='petrify'){
+    u.gazeCd-=dt;
+    if(u.gazeCd<=0 && !u.petrifyArmed){ u.petrifyArmed=true; u.gazeCd=5; }
+  }
+
+  let target=null;
+  if(u.lockedTarget && u.lockedTarget.hp>0 && u.lockedTarget.team!==u.team){
+    const d=Math.hypot(u.lockedTarget.x-u.x,u.lockedTarget.y-u.y);
+    if(d<=u.rng+u.lockedTarget.size){target=u.lockedTarget;}
+    else u.lockedTarget=null;
+  }
+  if(!target) target=findTarget(u);
+  if(!target) return;
+  
+  const d=Math.hypot(target.x-u.x,target.y-u.y);
+  const inRange=d<=u.rng+target.size;
+  
+  if(inRange){
+    if(u.dmg > 0) u.lockedTarget = target;
+    if(u.cd<=0 && u.dmg>0){
+      u.cd=u.rate;
+      let dmg=u.dmg;
+      if(u.chargeReady) dmg*=2;
+      u.chargeReady=false;u.distSinceHit=0;
+      
+      if(target.shieldUntil&&time<target.shieldUntil) dmg*=(1-target.shieldAmount);
+      if(target.dmgReductionUntil&&time<target.dmgReductionUntil&&u.rng>=3) dmg*=0.75;
+      if(target.markUntil && time < target.markUntil) dmg *= (1 + target.markBonus);
+      
+      if(u.ability==='quiver') {
+        u.shotsFired++;
+        if(u.shotsFired % 3 === 0) {
+          target.markUntil = time + 1.5;
+          target.markBonus = 0.12;
+        }
+      }
+
+      if (target.shield && target.shield > 0) {
+          const absorb = Math.min(target.shield, dmg);
+          target.shield -= absorb;
+          dmg -= absorb;
+      }
+      target.hp -= dmg;
+
+      if(target.hp<=0 && target.king!==undefined) u.killedTower=true;
+      if(u.petrifyArmed && target.king===undefined) {
+        target.stunUntil = time + 0.5;
+        u.petrifyArmed = false;
+      }
+      fx.push({x1:u.x,y1:u.y,x2:target.x,y2:target.y,t:0.12});
+      if(target.king!==undefined&&target.hp>0) target.active=true;
+    }
+  } else {
+    const p=pathPoint(u,target.x,target.y);
+    const dx=p.x-u.x,dy=p.y-u.y,dd=Math.hypot(dx,dy);
+    if(dd>0.001){
+      let sp=u.sp;
+      if(time<u.slowUntil) sp*=(1-u.slowAmount);
+      if(time<u.speedBuffUntil) sp*=1.1;
+      
+      const st=Math.min(dd,sp*dt);
+      u.x+=dx/dd*st;u.y+=dy/dd*st;
+      u.distSinceHit+=st;
+      if(u.charge&&u.distSinceHit>=2) u.chargeReady=true;
+    }
+  }
+}
+
+/* ---------- TOWER UPDATE ---------- */
+function updTower(t,dt){
+  if(!t.alive) return;
+  t.cd-=dt;
+  if(t.king&&!t.active) return;
+  if(t.cd>0) return;
+  let best=null,bd=t.range;
+  for(const u of units){
+    if(u.team===t.team||u.hp<=0) continue;
+    if(time<u.untargetableUntil) continue;
+    const d=Math.hypot(u.x-t.x,u.y-t.y);
+    if(d<bd){bd=d;best=u;}
+  }
+  if(best){
+    t.cd=t.rate;
+    let dmg=t.dmg;
+    if(best.dmgReductionUntil&&time<best.dmgReductionUntil) dmg*=0.75;
+    if(best.markUntil && time < best.markUntil) dmg *= (1 + best.markBonus);
+    
+    if (best.shield && best.shield > 0) {
+        const absorb = Math.min(best.shield, dmg);
+        best.shield -= absorb;
+        dmg -= absorb;
+    }
+    best.hp-=dmg;
+    fx.push({x1:t.x,y1:t.y,x2:best.x,y2:best.y,t:0.1});
+  }
+}
+
+/* ---------- MAIN UPDATE ---------- */
+function update(dt){
+  if(over) return;
+  time+=dt;
+  
+  const elixMult = time >= 120 ? 2 : 1;
+  for(let i=0;i<2;i++) elix[i]=Math.min(10,elix[i]+(dt/2.8)*elixMult);
+
+  if(window.AI) AI.tick(GameBridge, dt);
+  if(window.HeroSystem) HeroSystem.tick(GameBridge, dt);
+
+  for(const u of units) updUnit(u,dt);
+
+  for(const u of units){
+    if(u.hp<=0&&!u.deathDone){
+      u.deathDone=true;
+      if(u.relic) relics.push({x:u.x, y:u.y, team:u.team, until:time+3});
+      if(u.ability==='ward'&&time<u.wardUntil){
+        const fr=towers.filter(t=>t.team===u.team&&t.alive);
+        if(fr.length){
+          let nr=fr[0],nd=1e9;
+          for(const t of fr){const d=Math.hypot(t.x-u.x,t.y-u.y);if(d<nd){nd=d;nr=t;}}
+          nr.shieldUntil=time+3;nr.shieldAmount=0.15;
+        }
+      }
+      if(u.ability==='fossil') fossils.push({x:u.x,y:u.y,until:time+2,team:u.team});
+      if(u.splitType==='pup'){
+        let pupCount = 2;
+        if(u.ancient && u.killedTower) pupCount = 3;
+        const pupHp = u.ancient ? 450 : 400;
+        const pupDmg = u.ancient ? 90 : 80;
+        for(let i=0; i<pupCount; i++){
+          const angle = (i / pupCount) * Math.PI * 2;
+          units.push({
+            x: Math.max(0.6, Math.min(AW-0.6, u.x + Math.cos(angle)*0.8)),
+            y: Math.max(0.6, Math.min(AH-0.6, u.y + Math.sin(angle)*0.8)),
+            team: u.team, lane: u.lane, hp: pupHp, maxHp: pupHp, dmg: pupDmg, sp: 2.0, rng: 0.8, rate: 1.2,
+            cd: 0, size: 0.5, col: '#8a7a6a', emoji: '🐕', ancient: u.ancient, ability: null, towerOnly: false, lifetime: 0, charge: false,
+            distSinceHit: 0, chargeReady: false, slowUntil: 0, slowAmount: 0, untargetableUntil: 0, dmgReductionUntil: 0, wardUntil: 0, wardPulseCd: 0, deathDone: false, lockedTarget: null,
+            stunUntil: 0, gazeCd: 0, petrifyArmed: false, splitType: null, relic: false, killedTower: false, speedBuffUntil: 0, isRolling: false, maxRoll: 0, knockback: 0, spawnBarbarian: false, markUntil: 0, markBonus: 0, shotsFired: 0, isHero: false, shield: 0
+          });
+        }
+      }
+      if(u.splitType==='urn'){
+        for(let i=0; i<5; i++) {
+          const a = Math.random() * Math.PI * 2, r = Math.random() * 0.8, isAnc = u.ancient;
+          units.push({
+            x: Math.max(0.6, Math.min(AW-0.6, u.x + Math.cos(a)*r)),
+            y: Math.max(0.6, Math.min(AH-0.6, u.y + Math.sin(a)*r)),
+            team: u.team, lane: u.lane, hp: isAnc ? 75 : 60, maxHp: isAnc ? 75 : 60,
+            dmg: isAnc ? 70 : 60, sp: 3.0, rng: 0.8, rate: 1.0, cd: 0, size: 0.35,
+            col: '#e0e0e0', emoji: '💀', ancient: false, ability: null, towerOnly: false, lifetime: 0, charge: false, distSinceHit: 0, chargeReady: false, slowUntil: 0,
+            slowAmount: 0, untargetableUntil: 0, dmgReductionUntil: 0, wardUntil: 0, wardPulseCd: 0, deathDone: false, lockedTarget: null, stunUntil: 0, gazeCd: 0,
+            petrifyArmed: false, splitType: null, relic: false, killedTower: false, speedBuffUntil: 0, isRolling: false, maxRoll: 0, knockback: 0, spawnBarbarian: false, markUntil: 0, markBonus: 0, shotsFired: 0, isHero: false, shield: 0
+          });
+        }
+        if (u.ancient) fossils.push({x: u.x, y: u.y, until: time+2, team: u.team});
+      }
+    }
+  }
+  units=units.filter(u=>u.hp>0);
+
+  for(const r of relics){
+    if(time>=r.until) continue;
+    for(const u of units){
+      if(u.team === r.team && Math.hypot(u.x-r.x, u.y-r.y)<1.5) u.speedBuffUntil = Math.max(u.speedBuffUntil, time + 0.2);
+    }
+  }
+  relics=relics.filter(r=>time<r.until);
+
+  for(const f of fossils){
+    if(time>=f.until) continue;
+    for(const e of units){
+      if(e.team===f.team||e.hp<=0) continue;
+      if(Math.hypot(e.x-f.x,e.y-f.y)<2.5){
+        e.slowUntil=Math.max(e.slowUntil,time+0.15);
+        e.slowAmount=Math.max(e.slowAmount,0.15);
+      }
+    }
+  }
+  fossils=fossils.filter(f=>time<f.until);
+
+  for(let i=0;i<units.length;i++)for(let j=i+1;j<units.length;j++){
+    const a=units[i],b=units[j];
+    if(a.isRolling || b.isRolling) continue;
+    const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),mn=a.size+b.size;
+    if(d<mn&&d>0.001){
+      const p=(mn-d)/d*0.5;
+      a.x-=dx*p;a.y-=dy*p;b.x+=dx*p;b.y+=dy*p;
+    }
+  }
+
+  for(const t of towers) updTower(t,dt);
+  for(const t of towers){
+    if(t.alive&&t.hp<=0){
+      t.alive=false;
+      const k=towers.find(o=>o.team===t.team&&o.king);
+      if(k) k.active=true;
+      if(t.king) over=t.team===1?1:2;
+    }
+  }
+
+  for(const f of fx) f.t-=dt;
+  fx=fx.filter(f=>f.t>0);
+}
+
+/* ---------- DRAW ---------- */
+function drawTower(t){
+  if(!t.alive){
+    ctx.fillStyle='#33333a';
+    ctx.beginPath();ctx.arc(t.x*S,t.y*S,t.size*S,0,7);ctx.fill();
+    return;
+  }
+  const r=t.size*S, x=t.x*S, y=t.y*S;
+  ctx.fillStyle=t.team===0?'#22407f':'#7f2222';
+  ctx.beginPath();ctx.arc(x,y,r+2,0,7);ctx.fill();
+  if(t.shieldUntil&&time<t.shieldUntil){
+    ctx.strokeStyle='rgba(255,215,0,'+(0.6+0.3*Math.sin(time*10))+')';
+    ctx.lineWidth=3;ctx.beginPath();ctx.arc(x,y,r+8,0,7);ctx.stroke();
+  }
+  ctx.font=(r*1.5)+'px '+EF;ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(t.king?'👑':'🏰', x, y+2);
+  const w=r*2.2, by=y-r-12;
+  ctx.fillStyle='rgba(0,0,0,.65)';ctx.fillRect(x-w/2,by,w,6);
+  ctx.fillStyle=t.team===0?'#4caf50':'#e53935';
+  ctx.fillRect(x-w/2,by,w*Math.max(0,t.hp/t.maxHp),6);
+}
+
+function drawUnit(u){
+  const x=u.x*S,y=u.y*S,r=u.size*S;
+  
+  if(u.isHero){
+    ctx.strokeStyle='#ffd700';
+    ctx.lineWidth=3;
+    ctx.beginPath();ctx.arc(x,y,r+4,0,7);ctx.stroke();
+  } else if(u.ancient){
+    ctx.strokeStyle='#50ff78';
+    ctx.lineWidth=3;
+    ctx.beginPath();ctx.arc(x,y,r+4,0,7);ctx.stroke();
+    for(let s=0;s<3;s++){
+      const a=time*2+s*Math.PI*2/3;
+      ctx.fillStyle='rgba(80,255,120,'+(0.5+0.5*Math.sin(time*8+s))+')';
+      ctx.beginPath();ctx.arc(x+Math.cos(a)*(r+8),y+Math.sin(a)*(r+8),2,0,7);ctx.fill();
+    }
+  }
+
+  if(u.charge&&u.chargeReady){
+    ctx.strokeStyle='rgba(255,150,50,'+(0.5+0.3*Math.sin(time*10))+')';
+    ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,r+3,0,7);ctx.stroke();
+  }
+  ctx.fillStyle=u.team===0?'#22407f':'#7f2222';
+  ctx.beginPath();ctx.arc(x,y,r+2,0,7);ctx.fill();
+  ctx.fillStyle=u.col;
+  ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+  
+  if(time<u.slowUntil){
+    ctx.fillStyle='rgba(100,150,255,0.30)';
+    ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+  }
+  if(time<u.speedBuffUntil){
+    ctx.fillStyle='rgba(255,215,0,0.20)';
+    ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+  }
+  if(u.dmgReductionUntil&&time<u.dmgReductionUntil){
+    ctx.strokeStyle='rgba(255,220,100,'+(0.4+0.3*Math.sin(time*8))+')';
+    ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,r+5,0,7);ctx.stroke();
+  }
+  if(u.markUntil && time < u.markUntil){
+    ctx.strokeStyle='rgba(255, 50, 50, 0.8)';
+    ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(x, y, r+6, 0, 7);ctx.stroke();
+    ctx.fillStyle='rgba(255, 50, 50, 0.15)';
+    ctx.beginPath();ctx.arc(x, y, r+6, 0, 7);ctx.fill();
+  }
+  if(time<u.untargetableUntil){
+    ctx.fillStyle='rgba(255,255,255,'+(0.3+0.3*Math.sin(time*15))+')';
+    ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+  }
+  if(time<u.stunUntil){
+    ctx.fillStyle='rgba(200,200,255,0.4)';
+    ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+    ctx.font='12px system-ui';ctx.fillStyle='#fff';ctx.fillText('💫',x,y-r-10);
+  }
+  
+  if (u.shield && u.shield > 0) {
+    ctx.strokeStyle='rgba(200, 200, 255, 0.8)';
+    ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(x,y,r+5,0,7);ctx.stroke();
+  }
+
+  const fs=Math.max(13,r*1.9);
+  ctx.font=fs+'px '+EF;ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(u.emoji,x,y+1);
+  
+  if(u.hp<u.maxHp){
+    const w=r*2.4;
+    ctx.fillStyle='rgba(0,0,0,.65)';ctx.fillRect(x-w/2,y-r-13,w,4);
+    ctx.fillStyle=u.team===0?'#4caf50':'#e53935';
+    ctx.fillRect(x-w/2,y-r-13,w*Math.max(0,u.hp/u.maxHp),4);
+  }
+}
+
+function draw(){
+  ctx.fillStyle='#2f7d3a';ctx.fillRect(0,0,CW,640);
+  for(let y=0;y<AH;y++)for(let x=0;x<AW;x++){
+    if((x+y)&1){ctx.fillStyle='#357f40';ctx.fillRect(x*S,y*S,S,S);}
+  }
+  ctx.fillStyle='#1d6fc4';ctx.fillRect(0,RT*S,CW,(RB-RT)*S);
+  ctx.fillStyle='rgba(255,255,255,.16)';
+  for(let i=0;i<14;i++){
+    const wx=(i*53+((time*25)%53))%CW;
+    ctx.fillRect(wx,RT*S+(i%2?8:26),16,3);
+  }
+  for(const bx of [BL,BR]){
+    ctx.fillStyle='#8d6e3f';
+    ctx.fillRect((bx-1.2)*S,RT*S-3,2.4*S,(RB-RT)*S+6);
+    ctx.fillStyle='rgba(0,0,0,.15)';
+    for(let i=0;i<6;i++)ctx.fillRect((bx-1.2)*S,RT*S+i*7+2,2.4*S,2);
+  }
+  if(pSel>=0&&!over){
+    ctx.fillStyle='rgba(120,255,140,.10)';
+    ctx.fillRect(0,RY*S,CW,640-RY*S);
+  }
+  
+  for(const f of fossils){
+    ctx.fillStyle='rgba(120,100,60,0.55)';
+    ctx.beginPath();ctx.arc(f.x*S,f.y*S,11,0,7);ctx.fill();
+    ctx.font='14px '+EF;ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('🦴',f.x*S,f.y*S);
+  }
+  for(const r of relics){
+    ctx.fillStyle='rgba(255,215,0,0.40)';
+    ctx.beginPath();ctx.arc(r.x*S,r.y*S,12,0,7);ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(r.x*S,r.y*S,12,0,7);ctx.stroke();
+    ctx.font='14px '+EF;ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('📦',r.x*S,r.y*S);
+  }
+
+  for(const t of towers) drawTower(t);
+  for(const u of [...units].sort((a,b)=>a.y-b.y)) drawUnit(u);
+  
+  if(window.HeroSystem) HeroSystem.draw(ctx, time);
+
+  for(const f of fx){
+    if(f.type==='ring'){
+      const p=1-f.t/f.maxT;
+      ctx.strokeStyle='rgba(255,220,100,'+(f.t/f.maxT)+')';
+      ctx.lineWidth=3;ctx.beginPath();
+      ctx.arc(f.x*S,f.y*S,f.maxR*p,0,7);ctx.stroke();
+    } else {
+      ctx.strokeStyle='rgba(255,235,120,'+(f.t*6)+')';
+      ctx.lineWidth=2;
+      ctx.beginPath();ctx.moveTo(f.x1*S,f.y1*S);ctx.lineTo(f.x2*S,f.y2*S);ctx.stroke();
+    }
+  }
+
+  /* HUD */
+  ctx.fillStyle='#15151f';ctx.fillRect(0,640,CW,100);
+  const ex=12,ey=644,ew=CW-24,eh=14,seg=ew/10;
+  ctx.fillStyle='#000';ctx.fillRect(ex,ey,ew,eh);
+  for(let i=0;i<10;i++){
+    const f=Math.min(1,Math.max(0,elix[0]-i));
+    if(f>0){ctx.fillStyle='#c026d3';ctx.fillRect(ex+i*seg+1,ey+1,(seg-2)*f,eh-2);}
+  }
+  ctx.fillStyle='#fff';ctx.font='bold 10px system-ui';
+  ctx.textAlign='center';ctx.textBaseline='alphabetic';
+  ctx.fillText(Math.floor(elix[0]),ex+ew/2,ey+11);
+
+  for(let i=0;i<4;i++){
+    const slot=pDeck[i],card=ALL_CARDS[slot.ci];
+    const cx=10+i*66,cy=664,cw=60,ch=68;
+    const sel=pSel===i,ok=elix[0]>=card.c;
+    const cycleLen = card.ancient ? (card.ancient.ancientCycle || 2) : 0;
+    const anReady = slot.ancient && card.ancient && slot.counter >= cycleLen;
+    
+    ctx.fillStyle=anReady?'#50ff78':(sel?'#ffd54f':(ok?'#3a3a55':'#25253a'));
+    ctx.fillRect(cx-2,cy-2,cw+4,ch+4);
+    ctx.fillStyle=ok?'#2c2c46':'#1a1a28';
+    ctx.fillRect(cx,cy,cw,ch);
+    ctx.fillStyle=card.col;
+    ctx.beginPath();ctx.arc(cx+cw/2,cy+24,15,0,7);ctx.fill();
+    ctx.font='16px '+EF;ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(card.emoji,cx+cw/2,cy+25);
+    ctx.fillStyle='#fff';ctx.font='bold 10px system-ui';ctx.textBaseline='alphabetic';
+    ctx.fillText(card.n,cx+cw/2,cy+54);
+    
+    if(slot.ancient&&card.ancient){
+      for(let p=0;p<cycleLen;p++){
+        ctx.fillStyle=p<slot.counter?'#50ff78':'#444';
+        ctx.beginPath();ctx.arc(cx+cw/2-(cycleLen-1)*6+p*12,cy+62,3,0,7);ctx.fill();
+      }
+    }
+    ctx.fillStyle='#c026d3';
+    ctx.beginPath();ctx.arc(cx+11,cy+ch-9,9,0,7);ctx.fill();
+    ctx.fillStyle='#fff';ctx.font='bold 11px system-ui';
+    ctx.fillText(card.c,cx+11,cy+ch-5);
+  }
+
+  if (window.HeroSystem && HeroSystem.hasActiveHero()) {
+    HeroSystem.drawHUD(ctx, 300, 664, 50, 68, elix[0]);
+  }
+
+  const timeFrac = Math.min(1, time / 120);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(CW - 6, 0, 6, 640);
+  ctx.fillStyle = time >= 120 ? '#ffd700' : '#c026d3';
+  ctx.fillRect(CW - 6, 640 - 640 * timeFrac, 6, 640 * timeFrac);
+
+  if(over){
+    ctx.fillStyle='rgba(0,0,0,.72)';ctx.fillRect(0,0,CW,640);
+    ctx.fillStyle=over===1?'#4caf50':'#e53935';
+    ctx.font='bold 34px system-ui';ctx.textAlign='center';
+    ctx.fillText(over===1?'VICTORY!':'DEFEAT',CW/2,300);
+    ctx.fillStyle='#fff';ctx.font='bold 14px system-ui';
+    ctx.fillText('Tap to return to deck picker',CW/2,340);
+  }
+}
+
+function drawPick(){
+  ctx.fillStyle='#1a1a2e';ctx.fillRect(0,0,CW,CH);
+  ctx.fillStyle='#ffd54f';ctx.font='bold 24px system-ui';
+  ctx.textAlign='center';ctx.textBaseline='alphabetic';
+  ctx.fillText('PICK YOUR DECK',CW/2,30);
+  ctx.fillStyle=pickDeck.length===8?'#4caf50':'#aaa';
+  ctx.font='bold 16px system-ui';
+  ctx.fillText(pickDeck.length+' / 8',CW/2,55);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, PSY - 10, CW, PBY - PSY);
+  ctx.clip();
+
+  for(let i=0;i<ALL_CARDS.length;i++){
+    const card=ALL_CARDS[i];
+    const col=i%4,row=(i/4)|0;
+    const cx=PSX+col*(PCW+PPAD),cy=PSY+row*(PCH+PPAD)+pickScrollY;
+    const slot=pickDeck.find(s=>s.cardIndex===i);
+    const isSel=!!slot, isAn=slot&&slot.ancient;
+
+    ctx.fillStyle=isAn?'#4a3a10':(isSel?'#2c3a4a':'#2a2a3e');
+    ctx.fillRect(cx,cy,PCW,PCH);
+    ctx.strokeStyle=isAn?'#50ff78':(isSel?'#4caf50':'#444');
+    if (card.isHero) ctx.strokeStyle = isSel ? '#ffd700' : '#555';
+    ctx.lineWidth=(isSel||isAn)?3:1;
+    ctx.strokeRect(cx,cy,PCW,PCH);
+
+    ctx.fillStyle=card.col;
+    ctx.beginPath();ctx.arc(cx+PCW/2,cy+24,18,0,7);ctx.fill();
+    ctx.font='20px '+EF;ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(card.emoji,cx+PCW/2,cy+25);
+
+    ctx.fillStyle='#fff';ctx.font='bold 10px system-ui';ctx.textBaseline='alphabetic';
+    ctx.fillText(card.n,cx+PCW/2,cy+56);
+    ctx.font='8px system-ui';ctx.fillStyle='#aaa';
+    ctx.fillText(card.hp+' / '+card.dmg,cx+PCW/2,cy+70);
+
+    ctx.fillStyle='#c026d3';
+    ctx.beginPath();ctx.arc(cx+12,cy+PCH-12,9,0,7);ctx.fill();
+    ctx.fillStyle='#fff';ctx.font='bold 11px system-ui';
+    ctx.fillText(card.c,cx+12,cy+PCH-9);
+
+    if(card.ancient){
+      ctx.fillStyle=isAn?'#50ff78':'#555';
+      ctx.beginPath();ctx.arc(cx+PCW-15,cy+15,12,0,7);ctx.fill();
+      ctx.fillStyle=isAn?'#000':'#fff';
+      ctx.font='bold 14px system-ui';ctx.textBaseline='middle';
+      ctx.fillText('⚡',cx+PCW-15,cy+15);
+    }
+  }
+  ctx.restore();
+
+  const playOn=pickDeck.length===8;
+  ctx.fillStyle=playOn?'#4caf50':'#333';
+  ctx.fillRect(40,PBY,140,50);
+  ctx.strokeStyle=playOn?'#6fdf6f':'#555';ctx.lineWidth=2;
+  ctx.strokeRect(40,PBY,140,50);
+  ctx.fillStyle=playOn?'#fff':'#777';
+  ctx.font='bold 18px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText('PLAY',110,PBY+25);
+
+  ctx.fillStyle='#3a3a55';ctx.fillRect(190,PBY,130,50);
+  ctx.strokeStyle='#555';ctx.strokeRect(190,PBY,130,50);
+  ctx.fillStyle='#fff';ctx.font='bold 14px system-ui';
+  ctx.fillText('RANDOM',255,PBY+25);
+
+  if(!playOn){
+    ctx.fillStyle='#888';ctx.font='11px system-ui';ctx.textBaseline='alphabetic';
+    ctx.fillText('Select exactly 8 cards',CW/2,PBY+80);
+  }
+}
+
+function pickClick(mx,my){
+  if(mx>=40&&mx<=180&&my>=PBY&&my<=PBY+50){
+    if(pickDeck.length===8) startGame();
+    return;
+  }
+  if(mx>=190&&mx<=320&&my>=PBY&&my<=PBY+50){
+    pickDeck=[];
+    const idx=shuffleArray([...Array(ALL_CARDS.length).keys()]);
+    for(const ci of idx.slice(0,8)){
+      pickDeck.push({cardIndex:ci,ancient:!!(ALL_CARDS[ci].ancient&&Math.random()<0.5)});
+    }
+    return;
+  }
+  
+  const actualY = my - pickScrollY;
+  for(let i=0;i<ALL_CARDS.length;i++){
+    const col=i%4,row=(i/4)|0;
+    const cx=PSX+col*(PCW+PPAD),cy=PSY+row*(PCH+PPAD);
+    if(mx<cx||mx>cx+PCW||actualY<cy||actualY>cy+PCH) continue;
+    const card=ALL_CARDS[i];
+    if(card.ancient){
+      const bx=cx+PCW-15,by=cy+15;
+      if(Math.hypot(mx-bx,actualY-by)<15){
+        const slot=pickDeck.find(s=>s.cardIndex===i);
+        if(slot) slot.ancient=!slot.ancient;
+        else if(pickDeck.length<8) pickDeck.push({cardIndex:i,ancient:true});
+        return;
+      }
+    }
+    const si=pickDeck.findIndex(s=>s.cardIndex===i);
+    if(si>=0) pickDeck.splice(si,1);
+    else if(pickDeck.length<8) pickDeck.push({cardIndex:i,ancient:false});
+    return;
+  }
+}
+
+cvs.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  const r=cvs.getBoundingClientRect();
+  const mx=(e.clientX-r.left)/r.width*CW;
+  const my=(e.clientY-r.top)/r.height*CH;
+
+  if(state==='pick'){ pickClick(mx,my); return; }
+  if(over){ state='pick'; return; }
+
+  if(my>=660){
+    if (window.HeroSystem && HeroSystem.hasActiveHero()) {
+      if (mx >= 300 && mx <= 350) {
+         HeroSystem.onAbilityClick(elix);
+         return;
+      }
+    }
+    const i=Math.floor((mx-10)/66);
+    if(i>=0&&i<4&&mx>=10+i*66&&mx<=10+i*66+60) {
+        pSel = pSel===i ? -1 : i;
+    }
+    return;
+  }
+  
+  if(my<640){
+    const gx=mx/S,gy=my/S;
+    if(gy>RY+0.8&&gy<AH-0.4&&gx>0.6&&gx<AW-0.4){
+      if(pSel >= 0) {
+        if(deploy(0,pSel,gx,gy)) pSel = -1;
+      }
+    }
+  }
+});
+
+cvs.addEventListener('wheel', e => {
+    if (state === 'pick') {
+        e.preventDefault();
+        pickScrollY += e.deltaY;
+        const totalRows = Math.ceil(ALL_CARDS.length / 4);
+        const maxScroll = Math.max(0, (totalRows * (PCH + PPAD)) - (PBY - PSY) + 20);
+        pickScrollY = Math.max(0, Math.min(pickScrollY, maxScroll));
+    }
+}, { passive: false });
+
+function loop(t){
+  const dt=Math.min(0.05,(t-last)/1000||0);
+  last=t;
+  if(state==='play'){ update(dt); draw(); }
+  else drawPick();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
